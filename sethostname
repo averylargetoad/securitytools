@@ -1,0 +1,28 @@
+#!/bin/bash
+# 
+# Get AWS metadata
+#
+# Requires existing valid AWS credentials
+
+AWS_META_DATA="http://169.254.169.254/latest/meta-data"
+
+aws_az=$(curl -s ${AWS_META_DATA}/placement/availability-zone)
+instance_id=$(curl -s ${AWS_META_DATA}/instance-id)
+public_ip=$(curl -s ${AWS_META_DATA}/public-ipv4)
+local_ip=$(curl -s ${AWS_META_DATA}/local-ipv4)
+
+aws_region=${aws_az%?}
+
+instance_name=$(aws ec2 describe-tags --filters Name=resource-id,Values=${instance_id} Name=key,Values=Name --query Tags[].Value --output text)
+
+echo $instance_name > /etc/hostname
+sed -i -e "s/^HOSTNAME=.*$/HOSTNAME=$instance_name/" /etc/sysconfig/network
+
+hostname $instance_name
+
+export HOSTNAME=$(hostname)
+
+if [ -n "$local_ip" ] ; then
+	eval sed  -e $(printf "'/%s/d;/%s/d;/%s/d'" $local_ip $HOSTNAME $public_ip) -i /etc/hosts 
+	printf '%s\t%s # public-ipv4 %s\n' $local_ip $HOSTNAME $public_ip >> /etc/hosts
+fi

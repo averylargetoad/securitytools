@@ -1,0 +1,79 @@
+#!/bin/bash 
+# 
+# aws-firstboot get AWS metadata
+# Requires:
+# * jq
+# * curl
+# * AWS CLI
+# * AWS credentials
+# 
+# chkconfig: 2345 11 20
+# description: Get AWS instance Name and set hostname
+#
+
+date="$(date)"
+prog=$(basename $0)
+myzoneid=<AWS_ZONE_ID>
+myzonename=<AWS_ZONE_DOMAIN>
+
+batchfile=$(mktemp)
+
+trap '[ -z "$DEBUG" ] && rm -f $batchfile' EXIT 
+
+sethostname() {
+	# 
+	# get AWS metadata
+	
+	aws_az=$(curl -fs http://169.254.169.254/latest/meta-data/placement/availability-zone)
+	instance_id=$(curl -fs http://169.254.169.254/latest/meta-data/instance-id)
+	public_ip=$(curl -fs http://169.254.169.254/latest/meta-data/public-ipv4)
+	local_ip=$(curl -fs http://169.254.169.254/latest/meta-data/local-ipv4)
+	aws_region=${aws_az%?}
+
+	aws configure set region $aws_region
+
+	instance_name=$(aws ec2 describe-tags \
+		--filters Name=resource-id,Values=${instance_id} Name=key,Values=Name \
+		--query Tags[].Value --output text)
+	
+	myhostname="$(printf '%s.%s' $instance_name $myzonename | tee /etc/hostname)"
+	sed -i -e "s/^HOSTNAME=.*$/HOSTNAME=$myhostname/" /etc/sysconfig/network
+	
+	hostname $myhostname
+	
+	if [ -n "$local_ip" ] ; then
+		eval sed  -e $(printf "'/%s/d;/%s/d;/%s/d'" $local_ip $myhostname $public_ip) -i /etc/hosts 
+		printf '%s\t%s # public-ipv4 %s\n' $local_ip $myhostname $public_ip >> /etc/hosts
+
+		jq=$(printf '{Changes: [.={Action: "DELETE", ResourceRecordSet: .ResourceRecordSets[]|select(.ResourceRecords[].Value == "%s") }]}' $local_ip)
+		aws route53 list-resource-record-sets --hosted-zone-id $myzoneid|jq -c "$jq" > $batchfile
+		aws route53 change-resource-record-sets --hosted-zone-id ${myzoneid} --change-batch file://$batchfile
+
+		if [ -n "$public_ip" ] ; then
+			jq=$(printf '{Comment: "%s", Changes: [{Action: "UPSERT", ResourceRecordSet: {Name: "%s",Type: "A", TTL: 300, ResourceRecords: [{Value: "%s"},{Value: "%s"}]}}]}' "${instance_id} (${aws_az}) ${date}" ${myhostname} ${local_ip} ${public_ip})
+		else
+			jq=$(printf '{Comment: "%s", Changes: [{Action: "UPSERT", ResourceRecordSet: {Name: "%s",Type: "A", TTL: 300, ResourceRecords: [{Value: "%s"}]}}]}' "${instance_id} (${aws_az}) ${date}" ${myhostname} ${local_ip})
+		fi
+
+		jq -n -c "$jq" > $batchfile 
+		aws route53 change-resource-record-sets --hosted-zone-id ${myzoneid} --change-batch file://$batchfile
+
+
+	fi
+}
+
+[ -n "$DEBUG" ] && set -xv
+
+case "$1" in 
+	start)
+		sethostname
+		chkconfig $prog off
+	;;
+	reload)
+		chkconfig $prog on
+	;;
+
+	*)
+		# do nothing
+	;;
+esac
